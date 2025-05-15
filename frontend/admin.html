@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Админка терминалов</title>
+  <style>
+    body { background: #121212; color: #fff; font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 20px; }
+    .terminal-list { display: flex; flex-direction: column; gap: 10px; }
+    .terminal { display: flex; flex-wrap: wrap; align-items: center; background: #1e1e1e; padding: 10px; border-radius: 8px; justify-content: space-between; }
+    .terminal .left { display: flex; align-items: center; gap: 10px; }
+    .terminal .right { display: flex; align-items: center; gap: 10px; }
+    .btn { padding: 5px 10px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+    .btn-green { background: #156B2E; color: #fff; }
+    .btn-red { background: #800014; color: #fff; }
+    .btn-toggle { background: #fff; color: #000; }
+    #totalSum { margin-top: 20px; font-size: 18px; }
+    input { padding: 5px; border-radius: 5px; border: none; }
+    @media (max-width: 600px) {
+      .toolbar { flex-direction: column; align-items: stretch; }
+      .terminal { flex-direction: column; align-items: stretch; }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <input type="text" id="terminalId" placeholder="ID терминала">
+    <button class="btn btn-green" id="addBtn">Добавить терминал</button>
+  </div>
+
+  <div id="terminalList" class="terminal-list"></div>
+
+  <div id="totalSum">Общая сумма: 0 ₽</div>
+
+  <div id="successModal" style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:none;justify-content:center;align-items:center;z-index:2000;">
+    <div style="background:#fff;padding:20px 40px;border-radius:8px;font-size:24px;color:#000;text-align:center;">
+      Терминал успешно добавлен!
+      <br><br>
+      <button id="closeSuccess" style="margin-top:20px;padding:10px 20px;font-size:18px;">ОК</button>
+    </div>
+  </div>
+
+<script>
+const API_ROOT = "http://127.0.0.1:8787/api";
+let terminals = [];
+let seenTickets = new Set();
+
+async function loadTerminals() {
+  const resp = await fetch(`${API_ROOT}/terminals`);
+  terminals = await resp.json();
+  terminals.forEach(t => {
+    if (typeof t.total === 'undefined') t.total = 0;
+  });
+  render();
+}
+
+function render() {
+  const list = document.getElementById('terminalList');
+  list.innerHTML = '';
+  terminals.forEach(t => {
+    const div = document.createElement('div');
+    div.className = 'terminal';
+    div.innerHTML = `
+      <div class="left">
+        <span>${t.enabled ? '🟢' : '🔴'}</span>
+        <strong>№${t.id}</strong>
+      </div>
+      <div class="right">
+        <span>${t.total || 0} ₽</span>
+        <button class="btn btn-toggle" onclick="toggle(${t.id})">${t.enabled ? 'Отключить' : 'Включить'}</button>
+        <button class="btn btn-red" onclick="del(${t.id})">Удалить</button>
+      </div>
+    `;
+    list.appendChild(div);
+  });
+  const total = terminals.reduce((sum, t) => sum + (t.total || 0), 0);
+  document.getElementById('totalSum').textContent = `Общая сумма: ${total} ₽`;
+}
+
+async function toggle(id) {
+  await fetch(`${API_ROOT}/terminals/toggle`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id })
+  });
+  await loadTerminals();
+}
+
+async function del(id) {
+  if (!confirm(`Удалить терминал №${id}?`)) return;
+  await fetch(`${API_ROOT}/terminals/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id })
+  });
+  await loadTerminals();
+}
+
+async function addTerminal() {
+  const id = document.getElementById('terminalId').value.trim();
+  if (!id) return;
+  await fetch(`${API_ROOT}/terminals/add`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id })
+  });
+  document.getElementById('terminalId').value = '';
+  await loadTerminals();
+  document.getElementById('successModal').style.display = 'flex';
+}
+
+async function pollTickets() {
+  try {
+    const r = await fetch(`${API_ROOT}/tickets/new`);
+    const tickets = await r.json();
+    tickets.forEach(t => {
+      if (!seenTickets.has(t.id)) {
+        seenTickets.add(t.id);
+        const term = terminals.find(x => x.id === t.terminal_id);
+        if (term) term.total = (term.total || 0) + t.amount;
+      }
+    });
+    render();
+  } catch (e) {
+    console.error('Ошибка при опросе тикетов', e);
+  }
+}
+
+document.getElementById('addBtn').onclick = addTerminal;
+document.getElementById('closeSuccess').onclick = () => {
+  document.getElementById('successModal').style.display = 'none';
+};
+loadTerminals();
+setInterval(pollTickets, 10000);
+</script>
+
+</body>
+</html>

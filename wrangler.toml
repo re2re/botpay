@@ -1,0 +1,22 @@
+name = "botpay-worker"
+
+main = "src/index.ts"
+
+compatibility_date = "2025-04-23"
+compatibility_flags = ["nodejs_compat_v2"]
+
+browser = { binding = "MYBROWSER" }
+
+[[d1_databases]]
+binding             = "DB"
+database_name       = "botpay"
+database_id         = "e1b1ebfa-a700-40cb-915d-9c6fa4a2993d"   # замените на ваш реальный ID
+preview_database_id = "e1b1ebfa-a700-40cb-915d-9c6fa4a2993d"
+
+[triggers]
+crons = ["*/1 * * * *"]
+
+[vars]
+BOT_TOKEN     = "7373486531:AAFiSAzKQhKkYorgJ_l-XJ4aaBsZgKZJFF0"
+CHAT_MAIN     = "-1002614226963"
+CHAT_INKASS   = "-4747159973"
