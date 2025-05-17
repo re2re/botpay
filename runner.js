@@ -11,13 +11,34 @@ const {
   SITE_PASSWORD
 } = process.env;
 
+if (!BOT_TOKEN || !CHAT_MAIN) {
+  console.error('Missing Telegram configuration: BOT_TOKEN or CHAT_MAIN is not set');
+}
+
 // Хелпер для паузы в async-функциях
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Функция отправки сообщения в Telegram с логированием ошибок
+async function notify(msg) {
+  console.log('Notify:', msg);
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: CHAT_MAIN, text: msg })
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`Telegram send failed: ${res.status} - ${text}`);
+    }
+  } catch (err) {
+    console.error('Telegram notify error:', err);
+  }
+}
 
 // Глобальный экземпляр браузера
 let browser;
 
-// Инициализация и конфигурированный запуск браузера
 async function initBrowser() {
   if (!browser) {
     browser = await puppeteer.launch({
@@ -30,23 +51,45 @@ async function initBrowser() {
         '--single-process',
         '--no-zygote',
         '--renderer-process-limit=1'
-      ]
+      ],
+      timeout: 60000
     });
   }
   return browser;
 }
 
+// Получение тикетов с retry
 async function fetchNextTicket() {
-  const res = await fetch(`${API_ROOT}/tickets/new`);
-  if (!res.ok) throw new Error(`GET /tickets/new → ${res.status}`);
-  const data = await res.json();
-  if (!Array.isArray(data)) throw new Error(`Invalid tickets response: ${JSON.stringify(data)}`);
-  return data;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(`${API_ROOT}/tickets/new`);
+      if (!res.ok) throw new Error(`GET /tickets/new → ${res.status}`);
+      const data = await res.json();
+      if (!Array.isArray(data)) throw new Error(`Invalid tickets response: ${JSON.stringify(data)}`);
+      return data;
+    } catch (err) {
+      console.error(`fetchNextTicket attempt ${attempt} failed:`, err.message);
+      if (attempt < 3) {
+        await sleep(1000 * attempt);
+      } else {
+        throw err;
+      }
+    }
+  }
 }
 
 async function completeTicket(id) {
-  const res = await fetch(`${API_ROOT}/tickets/${id}/complete`, { method: 'POST' });
-  if (!res.ok) console.error(`Failed to complete ticket ${id}: ${await res.text()}`);
+  try {
+    const res = await fetch(`${API_ROOT}/tickets/${id}/complete`, { method: 'POST' });
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`Failed to complete ticket ${id}: ${res.status} - ${text}`);
+      await notify(`Error completing ticket ${id}: ${res.status}`);
+    }
+  } catch (err) {
+    console.error(`Error completing ticket ${id}:`, err);
+    await notify(`Error completing ticket ${id}: ${err.message}`);
+  }
 }
 
 async function processTicket(t) {
@@ -132,20 +175,16 @@ async function processTicket(t) {
     console.log('✅ Успешно обработано');
   } catch (err) {
     console.error('🔥 Ошибка в процессе:', err.message);
+    await notify(`🛑 Ошибка обработки тикета ${t.id}: ${err.message}`);
   } finally {
     await page.close();
   }
 
-  // Уведомление в Telegram
-  const msg =
-    status === 'SUCCESS'
-      ? `✅ Платёж ${AMOUNT} ₽ (терминал ${t.terminal_id})`
-      : `🛑 FAIL ${AMOUNT} ₽ (терминал ${t.terminal_id})`;
-  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: CHAT_MAIN, text: msg })
-  });
+  const msg = status === 'SUCCESS'
+    ? `✅ Платёж ${AMOUNT} ₽ (терминал ${t.terminal_id})`
+    : `🛑 FAIL ${AMOUNT} ₽ (терминал ${t.terminal_id})`;
+
+  await notify(msg);
 
   if (status === 'SUCCESS') {
     await completeTicket(t.id);
@@ -165,6 +204,7 @@ async function main() {
     }
   } catch (err) {
     console.error('Runner error:', err.message);
+    await notify(`🛑 Runner error: ${err.message}`);
   }
 }
 
@@ -172,8 +212,13 @@ async function main() {
 process.on('SIGINT',  async () => { if (browser) await browser.close(); process.exit(0); });
 process.on('SIGTERM', async () => { if (browser) await browser.close(); process.exit(0); });
 
-// Запуск main() сразу и затем каждые 5 секунд для постоянной работы
-main().catch(err => console.error('Fatal runner error:', err));
-setInterval(() => {
-  main().catch(err => console.error('Fatal runner error:', err));
-}, 5000);
+// Главный цикл: выполняем main(), ждём 5 сек, повторяем
+(async function runLoop() {
+  while (true) {
+    await main().catch(async err => {
+      console.error('Fatal runner error:', err);
+      await notify(`❌ Fatal runner error: ${err.message}`);
+    });
+    await sleep(5000);
+  }
+})();
