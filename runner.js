@@ -3,6 +3,7 @@ import 'dotenv/config';
 import fetch from 'node-fetch';
 import puppeteer from 'puppeteer';
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 const {
   API_ROOT,
   BOT_TOKEN,
