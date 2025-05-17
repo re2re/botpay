@@ -1,3 +1,4 @@
+// runner.js
 import 'dotenv/config';
 import fetch from 'node-fetch';
 import puppeteer from 'puppeteer';
@@ -8,87 +9,47 @@ const {
   CHAT_MAIN,
   SITE_URL,
   SITE_LOGIN,
-  SITE_PASSWORD
+  SITE_PASSWORD,
+  TERMINAL_ID
 } = process.env;
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// Парсим CLI-аргументы
+// node runner.js <PIN> <AMOUNT> [TERMINAL_ID]
+const [,, CLI_PIN, CLI_AMOUNT, CLI_TERMINAL] = process.argv;
+const isDebug = Boolean(CLI_PIN && CLI_AMOUNT);
 
-if (!BOT_TOKEN || !CHAT_MAIN) {
-  console.error('Missing Telegram configuration: BOT_TOKEN or CHAT_MAIN is not set');
+if (isDebug) {
+  console.log('⚙️  DEBUG MODE: получены аргументы:', {
+    PIN: CLI_PIN,
+    AMOUNT: CLI_AMOUNT,
+    TERMINAL: CLI_TERMINAL ?? TERMINAL_ID
+  });
 }
 
-// Хелпер для паузы в async-функциях
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-// Функция отправки сообщения в Telegram с логированием ошибок
-async function notify(msg) {
-  console.log('Notify:', msg);
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: CHAT_MAIN, text: msg })
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      console.error(`Telegram send failed: ${res.status} - ${text}`);
-    }
-  } catch (err) {
-    console.error('Telegram notify error:', err);
-  }
-}
-
-// Глобальный экземпляр браузера
-let browser;
-
-async function initBrowser() {
-  if (!browser) {
-    browser = await puppeteer.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--single-process',
-        '--no-zygote',
-        '--renderer-process-limit=1'
-      ],
-      timeout: 60000
-    });
-  }
-  return browser;
-}
-
-// Получение тикетов с retry
 async function fetchNextTicket() {
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const res = await fetch(`${API_ROOT}/tickets/new`);
-      if (!res.ok) throw new Error(`GET /tickets/new → ${res.status}`);
-      const data = await res.json();
-      if (!Array.isArray(data)) throw new Error(`Invalid tickets response: ${JSON.stringify(data)}`);
-      return data;
-    } catch (err) {
-      console.error(`fetchNextTicket attempt ${attempt} failed:`, err.message);
-      if (attempt < 3) {
-        await sleep(1000 * attempt);
-      } else {
-        throw err;
-      }
-    }
+  if (isDebug) {
+    // возвратим один фиктивный тикет
+    return [{
+      id:       0,
+      terminal_id: Number(CLI_TERMINAL ?? TERMINAL_ID ?? 0),
+      pin:      String(CLI_PIN).padStart(10, '0'),
+      amount:   Number(CLI_AMOUNT)
+    }];
   }
+
+  // обычный режим — pull из API
+  const res = await fetch(`${API_ROOT}/tickets/new`);
+  if (!res.ok) throw new Error(`GET /tickets/new → ${res.status}`);
+  return await res.json();
 }
 
 async function completeTicket(id) {
-  try {
-    const res = await fetch(`${API_ROOT}/tickets/${id}/complete`, { method: 'POST' });
-    if (!res.ok) {
-      const text = await res.text();
-      console.error(`Failed to complete ticket ${id}: ${res.status} - ${text}`);
-      await notify(`Error completing ticket ${id}: ${res.status}`);
-    }
-  } catch (err) {
-    console.error(`Error completing ticket ${id}:`, err);
-    await notify(`Error completing ticket ${id}: ${err.message}`);
+  if (isDebug) return; // не посылаем delete в debug-режиме
+  const res = await fetch(`${API_ROOT}/tickets/${id}/complete`, {
+    method: 'POST'
+  });
+  if (!res.ok) {
+    console.error(`❌ completeTicket(${id}) →`, await res.text());
   }
 }
 
@@ -97,14 +58,21 @@ async function processTicket(t) {
   const AMOUNT = t.amount;
   let status   = 'FAIL';
 
-  const browser = await initBrowser();
-  const page    = await browser.newPage();
-  page.setDefaultTimeout(20000);
+  console.log(`▶ Обработка тикета ${t.id} (терминал ${t.terminal_id}): PIN=${PIN}, AMOUNT=${AMOUNT}`);
+
+  const browser = await puppeteer.launch({
+    headless: false,               // для отладки увидите окно
+    slowMo:   50,
+    args: ['--no-sandbox','--disable-setuid-sandbox']
+  });
 
   try {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(20000);
+
     console.log('1) Вход в систему');
     await page.goto(SITE_URL, { waitUntil: 'networkidle0', timeout: 60000 });
-    await page.type('input[placeholder="Введите Ваш логин"]', SITE_LOGIN, { delay: 100 });
+    await page.type('input[placeholder="Введите Ваш логин"]',  SITE_LOGIN,   { delay: 100 });
     await page.type('input[placeholder="Введите Ваш пароль"]', SITE_PASSWORD, { delay: 100 });
     await page.click('button.btn.btn-red');
     await sleep(500);
@@ -126,7 +94,7 @@ async function processTicket(t) {
       const el = els.find(e => e.textContent?.trim() === 'Пополнение');
       el?.click();
     });
-    await sleep(500);
+    await page.waitForTimeout(500);
 
     console.log('5) Ввод PIN');
     await page.waitForSelector('input[aria-label="textbox"]');
@@ -175,16 +143,21 @@ async function processTicket(t) {
     console.log('✅ Успешно обработано');
   } catch (err) {
     console.error('🔥 Ошибка в процессе:', err.message);
-    await notify(`🛑 Ошибка обработки тикета ${t.id}: ${err.message}`);
   } finally {
-    await page.close();
+    await browser.close();
   }
 
-  const msg = status === 'SUCCESS'
+  // Отправляем Telegram-уведомление
+  const text = status === 'SUCCESS'
     ? `✅ Платёж ${AMOUNT} ₽ (терминал ${t.terminal_id})`
     : `🛑 FAIL ${AMOUNT} ₽ (терминал ${t.terminal_id})`;
 
-  await notify(msg);
+  console.log('▶ Telegram:', text);
+  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ chat_id: CHAT_MAIN, text })
+  });
 
   if (status === 'SUCCESS') {
     await completeTicket(t.id);
@@ -195,30 +168,15 @@ async function main() {
   try {
     const tickets = await fetchNextTicket();
     if (!tickets.length) {
-      console.log('No new tickets');
+      console.log('ℹ️  Нет новых тикетов');
       return;
     }
     for (const t of tickets) {
-      console.log('Processing ticket', t.id);
       await processTicket(t);
     }
   } catch (err) {
     console.error('Runner error:', err.message);
-    await notify(`🛑 Runner error: ${err.message}`);
   }
 }
 
-// Корректное завершение процесса – закрыть browser
-process.on('SIGINT',  async () => { if (browser) await browser.close(); process.exit(0); });
-process.on('SIGTERM', async () => { if (browser) await browser.close(); process.exit(0); });
-
-// Главный цикл: выполняем main(), ждём 5 сек, повторяем
-(async function runLoop() {
-  while (true) {
-    await main().catch(async err => {
-      console.error('Fatal runner error:', err);
-      await notify(`❌ Fatal runner error: ${err.message}`);
-    });
-    await sleep(5000);
-  }
-})();
+await main();
