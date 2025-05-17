@@ -1,8 +1,6 @@
 import 'dotenv/config';
+import fetch from 'node-fetch';
 import puppeteer from 'puppeteer';
-
-// Если Node <18, раскомментируйте следующую строку:
-// import fetch from 'node-fetch';
 
 const {
   API_ROOT,
@@ -16,6 +14,27 @@ const {
 // Хелпер для паузы в async-функциях
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// Глобальный экземпляр браузера
+let browser;
+
+async function initBrowser() {
+  if (!browser) {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--single-process',
+        '--no-zygote',
+        '--renderer-process-limit=1'
+      ]
+    });
+  }
+  return browser;
+}
+
 async function fetchNextTicket() {
   const res = await fetch(`${API_ROOT}/tickets/new`);
   if (!res.ok) throw new Error(`GET /tickets/new → ${res.status}`);
@@ -26,27 +45,22 @@ async function fetchNextTicket() {
 
 async function completeTicket(id) {
   const res = await fetch(`${API_ROOT}/tickets/${id}/complete`, { method: 'POST' });
-  if (!res.ok) {
-    console.error(`Failed to complete ticket ${id}: ${await res.text()}`);
-  }
+  if (!res.ok) console.error(`Failed to complete ticket ${id}: ${await res.text()}`);
 }
 
-async function rawProcessTicket(t) {
-  // Возвращает true при успехе, выбрасывает ошибку при неудаче
-  const PIN = String(t.pin).padStart(10, '0');
+async function processTicket(t) {
+  const PIN    = String(t.pin).padStart(10, '0');
   const AMOUNT = t.amount;
+  let status   = 'FAIL';
 
-  const browser = await puppeteer.launch({
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  });
+  const browser = await initBrowser();
+  const page    = await browser.newPage();
+  page.setDefaultTimeout(20000);
 
   try {
-    const page = await browser.newPage();
-    page.setDefaultTimeout(20000);
-
     console.log('1) Вход в систему');
     await page.goto(SITE_URL, { waitUntil: 'networkidle0', timeout: 60000 });
-    await page.type('input[placeholder="Введите Ваш логин"]', SITE_LOGIN, { delay: 100 });
+    await page.type('input[placeholder="Введите Ваш логин"]',  SITE_LOGIN,   { delay: 100 });
     await page.type('input[placeholder="Введите Ваш пароль"]', SITE_PASSWORD, { delay: 100 });
     await page.click('button.btn.btn-red');
     await sleep(500);
@@ -96,7 +110,7 @@ async function rawProcessTicket(t) {
 
     console.log('9) Ждём попап и проверяем содержимое');
     const popup = await page.waitForSelector('p.text-justify', { timeout: 25000 });
-    const txt = await popup.evaluate(el => el.textContent ?? '');
+    const txt   = await popup.evaluate(el => el.textContent ?? '');
     console.log('▶ popup text:', txt);
     if (!txt.includes(String(AMOUNT)) || !txt.includes(PIN)) {
       console.warn(`⚠️ Popup не подтвердил (PIN/AMOUNT): "${txt}"`);
@@ -113,43 +127,26 @@ async function rawProcessTicket(t) {
     const svgOut = await page.waitForSelector('svg[data-icon="right-from-bracket"]');
     await (await svgOut.evaluateHandle(el => el.closest('button'))).click();
 
-    console.log('✅ ticket ' + t.id + ' processed');
-    return true;
+    status = 'SUCCESS';
+    console.log('✅ Успешно обработано');
+  } catch (err) {
+    console.error('🔥 Ошибка в процессе:', err.message);
   } finally {
-    await browser.close();
-  }
-}
-
-async function handleTicket(t) {
-  let success = false;
-  let lastError = null;
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      console.log(`Processing ticket ${t.id}, attempt ${attempt}`);
-      await rawProcessTicket(t);
-      success = true;
-      break;
-    } catch (err) {
-      console.error(`Attempt ${attempt} failed for ticket ${t.id}:`, err.message);
-      lastError = err;
-      if (attempt < 3) await sleep(1000 * attempt);
-    }
+    await page.close();
   }
 
-  const AMOUNT = t.amount;
-  const msg = success
-    ? `✅ Платёж ${AMOUNT} ₽ (терминал ${t.terminal_id})`
-    : `🛑 FAIL ${AMOUNT} ₽ (терминал ${t.terminal_id}) после 3 попыток: ${lastError?.message}`;
-
-  // Telegram
+  // Уведомление в Telegram
+  const msg =
+    status === 'SUCCESS'
+      ? `✅ Платёж ${AMOUNT} ₽ (терминал ${t.terminal_id})`
+      : `🛑 FAIL ${AMOUNT} ₽ (терминал ${t.terminal_id})`;
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: CHAT_MAIN, text: msg })
   });
 
-  if (success) {
+  if (status === 'SUCCESS') {
     await completeTicket(t.id);
   }
 }
@@ -157,21 +154,19 @@ async function handleTicket(t) {
 async function main() {
   try {
     const tickets = await fetchNextTicket();
-    if (!tickets.length) {
-      console.log('No new tickets');
-      return;
-    }
+    if (!tickets.length) return console.log('No new tickets');
     for (const t of tickets) {
-      await handleTicket(t);
+      console.log('Processing ticket', t.id);
+      await processTicket(t);
     }
   } catch (err) {
     console.error('Runner error:', err.message);
   }
 }
 
-// Первый запуск и повтор каждые 5 секунд
-main().catch(err => console.error('Fatal error:', err));
-setInterval(main, 5000);
+// Корректное завершение процесса – закрыть browser
+process.on('SIGINT',  async () => { if (browser) await browser.close(); process.exit(0); });
+process.on('SIGTERM', async () => { if (browser) await browser.close(); process.exit(0); });
 
-// запускаем один раз (cron будет дергать этот файл каждую минуту)
+// Запуск (cron или systemd будет дергать этот файл)
 main();
