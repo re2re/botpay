@@ -3,7 +3,6 @@ import 'dotenv/config';
 import fetch from 'node-fetch';
 import puppeteer from 'puppeteer';
 
-
 const {
   API_ROOT,
   BOT_TOKEN,
@@ -12,6 +11,7 @@ const {
   SITE_LOGIN,
   SITE_PASSWORD
 } = process.env;
+const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
 
 async function fetchNextTicket() {
   const res = await fetch(`${API_ROOT}/tickets/new`);
