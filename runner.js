@@ -17,6 +17,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // Глобальный экземпляр браузера
 let browser;
 
+// Инициализация и конфигурированный запуск браузера
 async function initBrowser() {
   if (!browser) {
     browser = await puppeteer.launch({
@@ -60,7 +61,7 @@ async function processTicket(t) {
   try {
     console.log('1) Вход в систему');
     await page.goto(SITE_URL, { waitUntil: 'networkidle0', timeout: 60000 });
-    await page.type('input[placeholder="Введите Ваш логин"]',  SITE_LOGIN,   { delay: 100 });
+    await page.type('input[placeholder="Введите Ваш логин"]', SITE_LOGIN, { delay: 100 });
     await page.type('input[placeholder="Введите Ваш пароль"]', SITE_PASSWORD, { delay: 100 });
     await page.click('button.btn.btn-red');
     await sleep(500);
@@ -154,7 +155,10 @@ async function processTicket(t) {
 async function main() {
   try {
     const tickets = await fetchNextTicket();
-    if (!tickets.length) return console.log('No new tickets');
+    if (!tickets.length) {
+      console.log('No new tickets');
+      return;
+    }
     for (const t of tickets) {
       console.log('Processing ticket', t.id);
       await processTicket(t);
@@ -168,5 +172,8 @@ async function main() {
 process.on('SIGINT',  async () => { if (browser) await browser.close(); process.exit(0); });
 process.on('SIGTERM', async () => { if (browser) await browser.close(); process.exit(0); });
 
-// Запуск (cron или systemd будет дергать этот файл)
-main();
+// Запуск main() сразу и затем каждые 5 секунд для постоянной работы
+main().catch(err => console.error('Fatal runner error:', err));
+setInterval(() => {
+  main().catch(err => console.error('Fatal runner error:', err));
+}, 5000);
